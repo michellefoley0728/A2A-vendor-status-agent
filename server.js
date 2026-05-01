@@ -22,17 +22,21 @@ app.get('/.well-known/agent.json', (req, res) => {
     version: '1.0.0',
     provider: { organization: 'ServiceNow A2A Demo' },
     capabilities: { streaming: false },
+    defaultInputModes: ['text/plain'],
+    defaultOutputModes: ['text/plain'],
     skills: [
       {
         id: 'check_vendor_status',
         name: 'Check Vendor Status',
         description: 'Returns live operational status for a named SaaS vendor including any active incidents and ETAs.',
+        inputModes: ['text/plain'],
+        outputModes: ['text/plain'],
         examples: [
           'Is Salesforce down?',
           'Check Okta status',
           'Any active Slack incidents?',
-          'Users cannot log into Okta',
-          'GitHub repositories are not loading'
+          'Check status for GitHub',
+          'Check status for Zoom'
         ]
       }
     ]
@@ -41,74 +45,57 @@ app.get('/.well-known/agent.json', (req, res) => {
 
 app.post('/a2a', async (req, res) => {
   const body = req.body || {};
-  console.log('Incoming A2A request body:', JSON.stringify(body, null, 2));
+  const requestId = body.id || '1';
+
+  console.log('=== INCOMING A2A REQUEST ===');
+  console.log(JSON.stringify(body, null, 2));
 
   const extractText = (val) => {
     if (typeof val === 'string') return val;
     if (Array.isArray(val)) return val.map(extractText).join(' ');
-    if (typeof val === 'object' && val !== null) return Object.values(val).map(extractText).join(' ');
+    if (typeof val === 'object' && val !== null) {
+      return Object.values(val).map(extractText).join(' ');
+    }
     return '';
   };
 
   const userMessage = extractText(body);
-  console.log('Extracted message text:', userMessage);
+  console.log('Extracted message:', userMessage);
 
   const vendor = detectVendor(userMessage.toLowerCase());
   console.log('Detected vendor:', vendor);
 
   if (!vendor) {
-    const noVendorResponse = buildResponse(
-      'unknown',
-      null,
-      `Vendor Status Agent received the request but could not identify a supported vendor. Message received: "${userMessage.substring(0, 200)}". Supported vendors: ${Object.keys(VENDOR_STATUS_URLS).join(', ')}.`
-    );
-    console.log('No vendor detected. Returning:', JSON.stringify(noVendorResponse, null, 2));
-    return res.json(noVendorResponse);
+    const summary = `VENDOR STATUS CHECK COMPLETE\nVendor: UNKNOWN\nStatus: VENDOR NOT IDENTIFIED\nMessage received: "${userMessage.substring(0, 200)}"\nSupported vendors: ${Object.keys(VENDOR_STATUS_URLS).join(', ')}\nRecommendation: No supported vendor identified. Proceed with internal triage.`;
+    console.log('No vendor detected, returning:', summary);
+    return res.json(buildA2AResponse(requestId, summary));
   }
 
   try {
     console.log(`Fetching live status for: ${vendor}`);
     const statusData = await fetchVendorStatus(vendor);
     console.log('Raw status API response:', JSON.stringify(statusData, null, 2));
-    const response = buildResponse(vendor, statusData, null);
-    console.log('Final A2A response:', JSON.stringify(response, null, 2));
-    return res.json(response);
+    const summary = buildSummary(vendor, statusData, null);
+    console.log('Summary:', summary);
+    return res.json(buildA2AResponse(requestId, summary));
   } catch (err) {
-    console.log('Error fetching vendor status:', err.message);
-    const errorResponse = buildResponse(
-      vendor,
-      null,
-      `Vendor Status Agent encountered an error fetching status for ${vendor}: ${err.message}`
-    );
-    return res.json(errorResponse);
+    console.log('Error:', err.message);
+    const summary = `VENDOR STATUS CHECK COMPLETE\nVendor: ${vendor}\nStatus: ERROR\nError fetching status: ${err.message}\nRecommendation: Could not retrieve vendor status. Proceed with internal triage.`;
+    return res.json(buildA2AResponse(requestId, summary));
   }
 });
 
 app.get('/a2a/test', async (req, res) => {
   const vendor = req.query.vendor || 'github';
-  const message = req.query.message || '';
-  const detectedVendor = message ? detectVendor(message.toLowerCase()) : vendor;
-
   try {
-    const statusData = await fetchVendorStatus(detectedVendor);
-    const response = buildResponse(detectedVendor, statusData, null);
+    const statusData = await fetchVendorStatus(vendor);
+    const summary = buildSummary(vendor, statusData, null);
     res.json({
-      debug: {
-        input_vendor: vendor,
-        input_message: message,
-        detected_vendor: detectedVendor,
-        raw_status_data: statusData
-      },
-      a2a_response: response
+      debug: { vendor, raw: statusData },
+      a2a_response: buildA2AResponse('test-1', summary)
     });
   } catch (err) {
-    res.json({
-      debug: {
-        detected_vendor: detectedVendor,
-        error: err.message
-      },
-      a2a_response: buildResponse(detectedVendor, null, err.message)
-    });
+    res.json({ error: err.message });
   }
 });
 
@@ -121,131 +108,114 @@ function detectVendor(text) {
 
 async function fetchVendorStatus(vendor) {
   const url = VENDOR_STATUS_URLS[vendor];
-  if (!url) throw new Error(`No status URL configured for vendor: ${vendor}`);
-  const response = await fetch(url, {
-    signal: AbortSignal.timeout(8000)
-  });
+  if (!url) throw new Error(`No status URL configured for: ${vendor}`);
+  const response = await fetch(url, { signal: AbortSignal.timeout(8000) });
   if (!response.ok) throw new Error(`HTTP ${response.status} from ${url}`);
   return await response.json();
 }
 
-function buildResponse(vendor, data, errorMessage) {
-  let summary = '';
-  let vendorStatus = 'error';
+function buildSummary(vendor, data, errorMessage) {
+  if (errorMessage) return errorMessage;
 
-  if (errorMessage) {
-    summary = errorMessage;
-    vendorStatus = 'error';
+  const vendorName = vendor.charAt(0).toUpperCase() + vendor.slice(1);
 
-  } else if (vendor === 'salesforce' && data) {
-    const active = Array.isArray(data)
-      ? data.filter(i => i.status !== 'resolved')
-      : [];
+  if (vendor === 'salesforce' && data) {
+    const active = Array.isArray(data) ? data.filter(i => i.status !== 'resolved') : [];
     if (active.length === 0) {
-      vendorStatus = 'operational';
-      summary = [
+      return [
         'VENDOR STATUS CHECK COMPLETE',
-        'Vendor: Salesforce',
+        `Vendor: ${vendorName}`,
         'Status: FULLY OPERATIONAL',
         'No active incidents detected.',
-        'Recommendation: Salesforce is not the cause of this incident. Proceed with internal triage.'
-      ].join('\n');
-    } else {
-      vendorStatus = 'incident';
-      const inc = active[0];
-      summary = [
-        'VENDOR STATUS CHECK COMPLETE',
-        'Vendor: Salesforce',
-        'Status: ACTIVE INCIDENT DETECTED',
-        `Incident: ${inc.name}`,
-        `Severity: ${inc.impact}`,
-        `Started: ${inc.created_at}`,
-        `Latest Update: ${inc.incident_updates?.[0]?.body || 'No update available'}`,
-        'Recommendation: This is likely a Salesforce-side issue. Pause internal triage. Notify affected users. Monitor Salesforce status for resolution.'
+        `Recommendation: ${vendorName} is not the cause of this incident. Proceed with internal triage.`
       ].join('\n');
     }
+    const inc = active[0];
+    return [
+      'VENDOR STATUS CHECK COMPLETE',
+      `Vendor: ${vendorName}`,
+      'Status: ACTIVE INCIDENT DETECTED',
+      `Incident: ${inc.name}`,
+      `Severity: ${inc.impact}`,
+      `Started: ${inc.created_at}`,
+      `Latest Update: ${inc.incident_updates?.[0]?.body || 'No update available'}`,
+      `Recommendation: This is likely a ${vendorName}-side issue. Pause internal triage. Notify affected users.`
+    ].join('\n');
+  }
 
-  } else if (vendor === 'slack' && data) {
+  if (vendor === 'slack' && data) {
     const current = data.current_incident;
     if (!current) {
-      vendorStatus = 'operational';
-      summary = [
+      return [
         'VENDOR STATUS CHECK COMPLETE',
-        'Vendor: Slack',
+        `Vendor: ${vendorName}`,
         'Status: FULLY OPERATIONAL',
         'No active incidents detected.',
-        'Recommendation: Slack is not the cause of this incident. Proceed with internal triage.'
-      ].join('\n');
-    } else {
-      vendorStatus = 'incident';
-      summary = [
-        'VENDOR STATUS CHECK COMPLETE',
-        'Vendor: Slack',
-        'Status: ACTIVE INCIDENT DETECTED',
-        `Incident: ${current.name}`,
-        `Started: ${current.created_at}`,
-        'Recommendation: This is likely a Slack-side issue. Pause internal triage. Notify affected users.'
+        `Recommendation: ${vendorName} is not the cause of this incident. Proceed with internal triage.`
       ].join('\n');
     }
+    return [
+      'VENDOR STATUS CHECK COMPLETE',
+      `Vendor: ${vendorName}`,
+      'Status: ACTIVE INCIDENT DETECTED',
+      `Incident: ${current.name}`,
+      `Started: ${current.created_at}`,
+      `Recommendation: This is likely a ${vendorName}-side issue. Pause internal triage. Notify affected users.`
+    ].join('\n');
+  }
 
-  } else if (data?.status) {
-    const s = data.status;
-    const indicator = s.indicator || 'unknown';
-    const description = s.description || 'No description available';
-    const vendorName = vendor.charAt(0).toUpperCase() + vendor.slice(1);
-
+  if (data?.status) {
+    const indicator = data.status.indicator || 'unknown';
+    const description = data.status.description || 'No description available';
     if (indicator === 'none') {
-      vendorStatus = 'operational';
-      summary = [
+      return [
         'VENDOR STATUS CHECK COMPLETE',
         `Vendor: ${vendorName}`,
         'Status: FULLY OPERATIONAL',
         description,
         `Recommendation: ${vendorName} is not the cause of this incident. Proceed with internal triage.`
       ].join('\n');
-    } else {
-      vendorStatus = 'incident';
-      summary = [
-        'VENDOR STATUS CHECK COMPLETE',
-        `Vendor: ${vendorName}`,
-        'Status: ACTIVE INCIDENT DETECTED',
-        `Indicator: ${indicator}`,
-        description,
-        `Recommendation: This is likely a ${vendorName}-side issue. Pause internal triage. Notify affected users. Monitor ${vendorName} status for resolution.`
-      ].join('\n');
     }
-
-  } else {
-    vendorStatus = 'unknown';
-    summary = [
+    return [
       'VENDOR STATUS CHECK COMPLETE',
-      `Vendor: ${vendor}`,
-      'Status: UNABLE TO DETERMINE',
-      'Status data was retrieved but could not be parsed.',
-      'Recommendation: Manually check vendor status page and proceed with internal triage in parallel.'
+      `Vendor: ${vendorName}`,
+      'Status: ACTIVE INCIDENT DETECTED',
+      `Indicator: ${indicator}`,
+      description,
+      `Recommendation: This is likely a ${vendorName}-side issue. Pause internal triage. Notify affected users.`
     ].join('\n');
   }
 
+  return [
+    'VENDOR STATUS CHECK COMPLETE',
+    `Vendor: ${vendorName}`,
+    'Status: UNABLE TO DETERMINE',
+    'Status data retrieved but format unrecognized.',
+    'Recommendation: Manually check vendor status page and proceed with internal triage in parallel.'
+  ].join('\n');
+}
+
+function buildA2AResponse(requestId, text) {
   return {
     jsonrpc: '2.0',
-    id: 1,
+    id: requestId,
     result: {
-      status: 'completed',
+      id: String(requestId),
+      status: {
+        state: 'completed'
+      },
       artifacts: [
         {
           name: 'vendor_status_result',
-          parts: [{ type: 'text', text: summary }]
+          index: 0,
+          parts: [
+            {
+              type: 'text',
+              text: text
+            }
+          ]
         }
-      ],
-      message: {
-        role: 'agent',
-        parts: [{ type: 'text', text: summary }]
-      },
-      metadata: {
-        vendor: vendor,
-        vendor_status: vendorStatus,
-        checked_at: new Date().toISOString()
-      }
+      ]
     }
   };
 }
