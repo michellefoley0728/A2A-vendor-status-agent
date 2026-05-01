@@ -1,5 +1,4 @@
 const express = require('express');
-const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 const app = express();
 app.use(express.json());
 
@@ -17,7 +16,6 @@ const VENDOR_STATUS_URLS = {
   'servicenow': 'https://status.servicenow.com/api/v2/status.json'
 };
 
-// A2A Agent Card
 app.get('/.well-known/agent.json', (req, res) => {
   res.json({
     name: 'Vendor Status Agent',
@@ -31,22 +29,28 @@ app.get('/.well-known/agent.json', (req, res) => {
         id: 'check_vendor_status',
         name: 'Check Vendor Status',
         description: 'Returns live operational status for a named SaaS vendor including any active incidents and ETAs.',
-        examples: ['Is Salesforce down?', 'Check Okta status', 'Any active Slack incidents?']
+        examples: [
+          'Is Salesforce down?',
+          'Check Okta status',
+          'Any active Slack incidents?'
+        ]
       }
     ]
   });
 });
 
-// A2A task endpoint
 app.post('/a2a', async (req, res) => {
-  const userMessage = req.body?.message?.parts?.[0]?.text || req.body?.params?.message || '';
+  const userMessage = req.body?.message?.parts?.[0]?.text
+    || req.body?.params?.message
+    || '';
+
   const vendor = detectVendor(userMessage.toLowerCase());
 
   if (!vendor) {
     return res.json(buildResponse(
       'unknown',
       null,
-      `Could not identify a supported vendor in the request. Supported vendors: ${Object.keys(VENDOR_STATUS_URLS).join(', ')}.`
+      `Could not identify a supported vendor. Supported: ${Object.keys(VENDOR_STATUS_URLS).join(', ')}.`
     ));
   }
 
@@ -54,7 +58,11 @@ app.post('/a2a', async (req, res) => {
     const statusData = await fetchVendorStatus(vendor);
     return res.json(buildResponse(vendor, statusData, null));
   } catch (err) {
-    return res.json(buildResponse(vendor, null, `Failed to retrieve status for ${vendor}: ${err.message}`));
+    return res.json(buildResponse(
+      vendor,
+      null,
+      `Failed to retrieve status for ${vendor}: ${err.message}`
+    ));
   }
 });
 
@@ -67,7 +75,9 @@ function detectVendor(text) {
 
 async function fetchVendorStatus(vendor) {
   const url = VENDOR_STATUS_URLS[vendor];
-  const response = await fetch(url, { timeout: 8000 });
+  const response = await fetch(url, {
+    signal: AbortSignal.timeout(8000)
+  });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return await response.json();
 }
@@ -77,25 +87,40 @@ function buildResponse(vendor, data, errorMessage) {
 
   if (errorMessage) {
     summary = errorMessage;
+
   } else if (vendor === 'salesforce' && data) {
-    const active = data.filter(i => i.status !== 'resolved');
+    const active = Array.isArray(data)
+      ? data.filter(i => i.status !== 'resolved')
+      : [];
     if (active.length === 0) {
       summary = `Salesforce is fully operational. No active incidents.`;
     } else {
       const inc = active[0];
       summary = `ACTIVE INCIDENT -- Salesforce\nStatus: ${inc.status}\nTitle: ${inc.name}\nStarted: ${inc.created_at}\nLatest update: ${inc.incident_updates?.[0]?.body || 'No update available'}`;
     }
+
+  } else if (vendor === 'slack' && data) {
+    const status = data.status || {};
+    if (status.url === 'https://status.slack.com') {
+      summary = `Slack status retrieved. Current status: ${status.description || 'Unknown'}.`;
+    } else {
+      summary = `Slack is fully operational. No active incidents.`;
+    }
+
   } else if (data?.status) {
     const s = data.status;
     const indicator = s.indicator || 'unknown';
     const description = s.description || 'No description available';
+    const vendorName = vendor.charAt(0).toUpperCase() + vendor.slice(1);
+
     if (indicator === 'none') {
-      summary = `${vendor.charAt(0).toUpperCase() + vendor.slice(1)} is fully operational. ${description}`;
+      summary = `${vendorName} is fully operational. ${description}`;
     } else {
-      summary = `${vendor.toUpperCase()} INCIDENT DETECTED\nIndicator: ${indicator}\nStatus: ${description}`;
+      summary = `ACTIVE INCIDENT -- ${vendorName}\nIndicator: ${indicator}\nStatus: ${description}`;
     }
+
   } else {
-    summary = `Status data retrieved for ${vendor} but format was unrecognized.`;
+    summary = `Status data retrieved for ${vendor} but response format was unrecognized.`;
   }
 
   return {
@@ -111,6 +136,10 @@ function buildResponse(vendor, data, errorMessage) {
   };
 }
 
-app.get('/health', (req, res) => res.json({ status: 'ok', agent: 'vendor-status-agent' }));
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', agent: 'vendor-status-agent' });
+});
 
-app.listen(PORT, () => console.log(`Vendor Status Agent running on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Vendor Status Agent running on port ${PORT}`);
+});
