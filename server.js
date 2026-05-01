@@ -3,7 +3,7 @@ const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 8080;
-const AGENT_BASE_URL = 'https://your-railway-url.up.railway.app';
+const AGENT_BASE_URL = 'https://a2a-vendor-status-agent-production.up.railway.app';
 
 const VENDOR_STATUS_URLS = {
   'salesforce': 'https://status.salesforce.com/api/v1/incidents',
