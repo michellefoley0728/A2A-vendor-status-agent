@@ -1,11 +1,13 @@
 {
-  "name": "vendor-status-agent",
+  "name": "incident-enrichment-agent",
   "version": "1.0.0",
+  "description": "A2A external agent that enriches ServiceNow incidents by detecting whether an issue is widespread vs isolated using public sources",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "express": "^4.18.2"
+    "express": "^4.18.2",
+    "node-fetch": "^2.7.0"
   }
 }
