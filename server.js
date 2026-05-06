@@ -351,6 +351,15 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', agent: 'Incident Enrichment Agent', timestamp: new Date().toISOString() });
 });
 
+
+// ---------------------------------------------------------------------------
+// Debug endpoint -- echoes full request body (remove after debugging)
+// ---------------------------------------------------------------------------
+app.post('/debug', (req, res) => {
+  console.log('DEBUG REQUEST:', JSON.stringify(req.body, null, 2));
+  res.json({ received: req.body });
+});
+
 // ---------------------------------------------------------------------------
 // Core task handler -- shared by both JSON-RPC and direct formats
 // ---------------------------------------------------------------------------
@@ -400,6 +409,25 @@ async function handleTask(userMessage, taskId) {
 app.post('/a2a', async (req, res) => {
   const body = req.body;
 
+  // TEMPORARY DEBUG -- return full request body so we can see what ServiceNow sends
+  // Remove this block after debugging
+  if (body?._debug === true || process.env.DEBUG_MODE === 'true') {
+    return res.json({
+      jsonrpc: body?.jsonrpc || '2.0',
+      id: body?.id || 'debug',
+      result: {
+        id: body?.id || 'debug',
+        status: { state: 'completed' },
+        result: {
+          message: {
+            role: 'agent',
+            parts: [{ type: 'text', text: 'DEBUG RECEIVED: ' + JSON.stringify(body, null, 2) }]
+          }
+        }
+      }
+    });
+  }
+
   // JSON-RPC format (ServiceNow A2A protocol)
   if (body?.jsonrpc === '2.0') {
     const method = body.method;
@@ -426,11 +454,18 @@ app.post('/a2a', async (req, res) => {
         (Object.keys(params).length > 0 ? JSON.stringify(params) : '');
 
       if (!userMessage) {
-        return res.json({
-          jsonrpc: '2.0',
-          id,
-          error: { code: -32602, message: 'Invalid params: no message text found. Received: ' + JSON.stringify(body) }
-        });
+        // Return as SUCCESS with debug info so ServiceNow shows us the body
+        const taskResult = {
+          id: id,
+          status: { state: 'completed' },
+          result: {
+            message: {
+              role: 'agent',
+              parts: [{ type: 'text', text: 'DEBUG - NO MESSAGE FOUND. Full body received: ' + JSON.stringify(body) }]
+            }
+          }
+        };
+        return res.json({ jsonrpc: '2.0', id, result: taskResult });
       }
 
       const taskResult = await handleTask(userMessage, id);
