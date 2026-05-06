@@ -352,28 +352,15 @@ app.get('/health', (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// A2A Task Endpoint
+// Core task handler -- shared by both JSON-RPC and direct formats
 // ---------------------------------------------------------------------------
-app.post('/a2a', async (req, res) => {
-  // Support both A2A message format and plain text input for flexibility
-  const userMessage =
-    req.body?.message?.parts?.[0]?.text ||
-    req.body?.params?.message ||
-    req.body?.input ||
-    '';
-
-  if (!userMessage) {
-    return res.status(400).json({
-      error: 'No message provided. Send a vendor name or incident description.'
-    });
-  }
-
+async function handleTask(userMessage, taskId) {
   const vendorKey = detectVendor(userMessage);
 
   if (!vendorKey) {
     const supportedList = Object.values(VENDORS).map(v => v.label).join(', ');
-    return res.json({
-      id: req.body?.id || 'unknown',
+    return {
+      id: taskId,
       status: { state: 'completed' },
       result: {
         message: {
@@ -384,10 +371,9 @@ app.post('/a2a', async (req, res) => {
           }]
         }
       }
-    });
+    };
   }
 
-  // Fetch signals in parallel
   const [officialStatus, downdetectorSignal] = await Promise.all([
     fetchOfficialStatus(vendorKey),
     fetchDowndetectorSignal(vendorKey)
@@ -396,19 +382,75 @@ app.post('/a2a', async (req, res) => {
   const verdict = synthesizeVerdict(vendorKey, officialStatus, downdetectorSignal, userMessage);
   const responseText = buildResponse(vendorKey, officialStatus, downdetectorSignal, verdict, userMessage);
 
-  return res.json({
-    id: req.body?.id || 'unknown',
+  return {
+    id: taskId,
     status: { state: 'completed' },
     result: {
       message: {
         role: 'agent',
-        parts: [{
-          type: 'text',
-          text: responseText
-        }]
+        parts: [{ type: 'text', text: responseText }]
       }
     }
-  });
+  };
+}
+
+// ---------------------------------------------------------------------------
+// A2A Task Endpoint -- handles both JSON-RPC (ServiceNow) and direct formats
+// ---------------------------------------------------------------------------
+app.post('/a2a', async (req, res) => {
+  const body = req.body;
+
+  // JSON-RPC format (ServiceNow A2A protocol)
+  if (body?.jsonrpc === '2.0') {
+    const method = body.method;
+    const id = body.id || 'unknown';
+
+    // Handle supported methods
+    if (method === 'tasks/send' || method === 'tasks/run') {
+      const userMessage =
+        body.params?.message?.parts?.[0]?.text ||
+        body.params?.input ||
+        '';
+
+      if (!userMessage) {
+        return res.json({
+          jsonrpc: '2.0',
+          id,
+          error: { code: -32602, message: 'Invalid params: no message text found' }
+        });
+      }
+
+      const taskResult = await handleTask(userMessage, id);
+      return res.json({
+        jsonrpc: '2.0',
+        id,
+        result: taskResult
+      });
+    }
+
+    // Unknown method
+    return res.json({
+      jsonrpc: '2.0',
+      id,
+      error: { code: -32601, message: `Method not found: ${method}` }
+    });
+  }
+
+  // Direct format (testing / non-ServiceNow callers)
+  const userMessage =
+    body?.message?.parts?.[0]?.text ||
+    body?.params?.message ||
+    body?.input ||
+    '';
+
+  if (!userMessage) {
+    return res.status(400).json({
+      error: 'No message provided. Send a vendor name or incident description.'
+    });
+  }
+
+  const taskResult = await handleTask(userMessage, body?.id || 'unknown');
+  return res.json(taskResult);
 });
 
 // ---------------------------------------------------------------------------
