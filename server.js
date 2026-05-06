@@ -404,101 +404,114 @@ async function handleTask(userMessage, taskId) {
 }
 
 // ---------------------------------------------------------------------------
-// A2A Task Endpoint -- handles both JSON-RPC (ServiceNow) and direct formats
+// A2A Task Endpoint -- matches ServiceNow A2A protocol (message/send format)
 // ---------------------------------------------------------------------------
 app.post('/a2a', async (req, res) => {
-  const body = req.body;
+  const { id, method, params } = req.body || {};
 
-  // TEMPORARY DEBUG -- return full request body so we can see what ServiceNow sends
-  // Remove this block after debugging
-  if (body?._debug === true || process.env.DEBUG_MODE === 'true') {
-    return res.json({
-      jsonrpc: body?.jsonrpc || '2.0',
-      id: body?.id || 'debug',
-      result: {
-        id: body?.id || 'debug',
-        status: { state: 'completed' },
-        result: {
-          message: {
-            role: 'agent',
-            parts: [{ type: 'text', text: 'DEBUG RECEIVED: ' + JSON.stringify(body, null, 2) }]
-          }
-        }
-      }
+  // Reject missing method
+  if (!method) {
+    return res.status(400).json({
+      jsonrpc: '2.0',
+      id: id || null,
+      error: { code: -32600, message: 'Invalid request: missing method' }
     });
   }
 
-  // JSON-RPC format (ServiceNow A2A protocol)
-  if (body?.jsonrpc === '2.0') {
-    const method = body.method;
-    const id = body.id || 'unknown';
+  // Primary handler: message/send (ServiceNow A2A format)
+  if (method === 'message/send' || method === 'tasks/send' || method === 'tasks/run') {
+    const message = params?.message;
+    const parts = message?.parts || [];
+    const textPart = parts.find(p => p.kind === 'text' || p.type === 'text');
+    const userMessage = textPart?.text || message?.text || params?.input || '';
 
-    // Handle supported methods
-    if (method === 'tasks/send' || method === 'tasks/run') {
-      const params = body.params || {};
-
-      // Broad extraction -- ServiceNow may nest the text in various locations
-      const userMessage =
-        params?.message?.parts?.[0]?.text ||
-        params?.message?.parts?.[0]?.content ||
-        params?.message?.content ||
-        params?.message?.text ||
-        params?.input?.message?.parts?.[0]?.text ||
-        params?.input?.text ||
-        (typeof params?.input === 'string' ? params.input : '') ||
-        params?.task ||
-        params?.text ||
-        params?.query ||
-        body?.task ||
-        body?.text ||
-        (Object.keys(params).length > 0 ? JSON.stringify(params) : '');
-
-      if (!userMessage) {
-        // Return as SUCCESS with debug info so ServiceNow shows us the body
-        const taskResult = {
-          id: id,
-          status: { state: 'completed' },
-          result: {
-            message: {
-              role: 'agent',
-              parts: [{ type: 'text', text: 'DEBUG - NO MESSAGE FOUND. Full body received: ' + JSON.stringify(body) }]
-            }
-          }
-        };
-        return res.json({ jsonrpc: '2.0', id, result: taskResult });
-      }
-
-      const taskResult = await handleTask(userMessage, id);
+    if (!userMessage) {
       return res.json({
         jsonrpc: '2.0',
         id,
-        result: taskResult
+        result: {
+          kind: 'task',
+          id: `task-${Date.now()}`,
+          contextId: message?.contextId || `ctx-${Date.now()}`,
+          status: { state: 'completed', timestamp: new Date().toISOString() },
+          artifacts: [{
+            artifactId: `art-${Date.now()}`,
+            name: 'response',
+            parts: [{ kind: 'text', text: 'Please provide a vendor or application name and describe the issue.' }]
+          }]
+        }
       });
     }
 
-    // Unknown method
+    const vendorKey = detectVendor(userMessage);
+
+    if (!vendorKey) {
+      const supportedList = Object.values(VENDORS).map(v => v.label).join(', ');
+      return res.json({
+        jsonrpc: '2.0',
+        id,
+        result: {
+          kind: 'task',
+          id: `task-${Date.now()}`,
+          contextId: message?.contextId || `ctx-${Date.now()}`,
+          status: { state: 'completed', timestamp: new Date().toISOString() },
+          artifacts: [{
+            artifactId: `art-${Date.now()}`,
+            name: 'response',
+            parts: [{ kind: 'text', text: `Could not identify a supported vendor in the request: "${userMessage}"\n\nSupported vendors: ${supportedList}` }]
+          }]
+        }
+      });
+    }
+
+    try {
+      const [officialStatus, downdetectorSignal] = await Promise.all([
+        fetchOfficialStatus(vendorKey),
+        fetchDowndetectorSignal(vendorKey)
+      ]);
+
+      const verdict = synthesizeVerdict(vendorKey, officialStatus, downdetectorSignal, userMessage);
+      const responseText = buildResponse(vendorKey, officialStatus, downdetectorSignal, verdict, userMessage);
+
+      return res.json({
+        jsonrpc: '2.0',
+        id,
+        result: {
+          kind: 'task',
+          id: `task-${Date.now()}`,
+          contextId: message?.contextId || `ctx-${Date.now()}`,
+          status: { state: 'completed', timestamp: new Date().toISOString() },
+          artifacts: [{
+            artifactId: `art-${Date.now()}`,
+            name: 'incident_enrichment_report',
+            parts: [{ kind: 'text', text: responseText }]
+          }]
+        }
+      });
+    } catch (err) {
+      return res.json({
+        jsonrpc: '2.0',
+        id,
+        error: { code: -32000, message: `Agent error: ${err.message}` }
+      });
+    }
+  }
+
+  // tasks/get -- stateless agent
+  if (method === 'tasks/get') {
     return res.json({
       jsonrpc: '2.0',
       id,
-      error: { code: -32601, message: `Method not found: ${method}` }
+      error: { code: -32001, message: 'Task not found (stateless agent)' }
     });
   }
 
-  // Direct format (testing / non-ServiceNow callers)
-  const userMessage =
-    body?.message?.parts?.[0]?.text ||
-    body?.params?.message ||
-    body?.input ||
-    '';
-
-  if (!userMessage) {
-    return res.status(400).json({
-      error: 'No message provided. Send a vendor name or incident description.'
-    });
-  }
-
-  const taskResult = await handleTask(userMessage, body?.id || 'unknown');
-  return res.json(taskResult);
+  // Unknown method
+  return res.json({
+    jsonrpc: '2.0',
+    id,
+    error: { code: -32601, message: `Method not found: ${method}` }
+  });
 });
 
 // ---------------------------------------------------------------------------
