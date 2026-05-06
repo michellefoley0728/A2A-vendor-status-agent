@@ -407,16 +407,29 @@ app.post('/a2a', async (req, res) => {
 
     // Handle supported methods
     if (method === 'tasks/send' || method === 'tasks/run') {
+      const params = body.params || {};
+
+      // Broad extraction -- ServiceNow may nest the text in various locations
       const userMessage =
-        body.params?.message?.parts?.[0]?.text ||
-        body.params?.input ||
-        '';
+        params?.message?.parts?.[0]?.text ||
+        params?.message?.parts?.[0]?.content ||
+        params?.message?.content ||
+        params?.message?.text ||
+        params?.input?.message?.parts?.[0]?.text ||
+        params?.input?.text ||
+        (typeof params?.input === 'string' ? params.input : '') ||
+        params?.task ||
+        params?.text ||
+        params?.query ||
+        body?.task ||
+        body?.text ||
+        (Object.keys(params).length > 0 ? JSON.stringify(params) : '');
 
       if (!userMessage) {
         return res.json({
           jsonrpc: '2.0',
           id,
-          error: { code: -32602, message: 'Invalid params: no message text found' }
+          error: { code: -32602, message: 'Invalid params: no message text found. Received: ' + JSON.stringify(body) }
         });
       }
 
