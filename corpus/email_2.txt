@@ -1,18 +1,18 @@
-From: james.rodriguez@company.com
-To: sarah.chen@company.com
-Date: March 15, 2024
-Subject: RE: VPN Dropping on Building C Floor 2
+From: Infrastructure Team <infra@company.com>
+To: IT Support
+Date: March 20, 2024
+Subject: Building C Access Point Firmware Update - Scheduled Maintenance
 
-Hi Sarah,
+IT Team,
 
-We've actually seen this before. Building C had some new WiFi access points installed in January, and we've noticed a few compatibility issues with the Cisco VPN client on certain floors.
+Scheduled maintenance alert for Building C network infrastructure:
 
-A few things your team can try:
-1. Try connecting via wired Ethernet instead of WiFi if possible - this usually resolves it immediately
-2. In the VPN client settings, try disabling IPv6 - we found this helps on those specific access points
-3. Update to the latest VPN client version (we released a patch in February)
+Building C WiFi access points (AP-BC-01 through AP-BC-04) will be taken offline tomorrow (March 21) from 9:00 AM to 12:00 PM for critical firmware updates. This addresses compatibility issues with certain VPN client versions (specifically v9.1.4 and earlier) that have been causing connection drops in this building.
 
-If none of those work, let me know and I can escalate to the network team. They might need to adjust the access point configuration.
+Updated firmware will support both IPv4 and IPv6 negotiation properly. After the update, users should upgrade to VPN client v9.2.1 or later for optimal performance.
 
-James
-IT Support
+Expected outcome: VPN connection stability restored in Building C.
+
+Please communicate the maintenance window to users and advise them to update their VPN clients to v9.2.1 after the maintenance completes.
+
+- Infrastructure Team
